@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+# Launch alacritty terminal with awareness of focused terminal context
+#
+# Features:
+#   - Detects if focused window is a terminal (alacritty, kitty, xterm, gnome-terminal)
+#   - Extracts working directory from the focused terminal's shell process
+#   - Falls back to regular alacritty launch if no terminal is focused
+#
+# Niri compatibility: Uses 'niri msg --json focused-window' to get window info
+
+# Get the currently focused window
+FOCUSED_WINDOW=$(niri msg --json focused-window)
+if [ -z "$FOCUSED_WINDOW" ]; then
+    alacritty &
+    exit 0
+fi
+
+FOCUSED_PID=$(echo "$FOCUSED_WINDOW" | jq -r '.pid // empty')
+if [ -z "$FOCUSED_PID" ]; then
+    alacritty &
+    exit 0
+fi
+
+# Determine if focused window is a terminal and extract its context
+extract_terminal_context() {
+    local pid=$1
+    local is_terminal=0
+    
+    # Check if the focused window is a terminal emulator
+    local cmd=$(ps -p "$pid" -o comm= 2>/dev/null)
+    if [[ "$cmd" == "alacritty" || "$cmd" == "kitty" || "$cmd" == "xterm" || "$cmd" == "gnome-terminal" ]]; then
+        is_terminal=1
+    fi
+    
+    if [ $is_terminal -eq 0 ]; then
+        return 1
+    fi
+    
+    # Find the shell process running inside this terminal
+    local shell_pid=$(pgrep -P "$pid" -f "(bash|zsh|fish|sh)$" 2>/dev/null | head -1)
+    
+    if [ -z "$shell_pid" ]; then
+        return 1
+    fi
+    
+    # Extract working directory from /proc
+    local cwd=$(readlink "/proc/$shell_pid/cwd" 2>/dev/null)
+    if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+        echo "cwd=$cwd"
+    fi
+}
+
+# Extract context from focused terminal
+declare -A context
+while IFS='=' read -r key value; do
+    if [ -n "$key" ]; then
+        context["$key"]="$value"
+    fi
+done < <(extract_terminal_context "$FOCUSED_PID")
+
+# Determine launch command
+if [ -n "${context[cwd]}" ] && [ -d "${context[cwd]}" ]; then
+    # Launch terminal in the same working directory
+    (cd "${context[cwd]}" && alacritty) &
+else
+    # No context found, launch normally
+    alacritty &
+fi
